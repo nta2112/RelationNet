@@ -1,105 +1,240 @@
 # code is based on https://github.com/katerakelly/pytorch-maml
+# Extended with JSON split support (2 formats)
+#
+# ─── JSON Format 1 – Split-list (một file chứa cả 3 splits) ───────────────
+#   split.json:
+#   {
+#     "train": ["n01532829", "n01558993", ...],   ← tên thư mục class
+#     "val":   ["n01855672", ...],
+#     "test":  ["n01930112", ...]
+#   }
+#   Ảnh được đọc từ: <data_root>/<class_name>/*.jpg
+#
+# ─── JSON Format 2 – Image-list (mỗi split một file, kiểu Chen et al.) ───
+#   train.json / val.json / test.json:
+#   {
+#     "label_names": ["class1", "class2", ...],
+#     "image_names": ["n01532829/img_001.jpg", ...],   ← path tương đối
+#     "image_labels": [0, 0, 1, 1, ...]
+#   }
+#   Ảnh được đọc từ: <data_root>/<image_name>
+
 import torchvision
 import torchvision.datasets as dset
 import torchvision.transforms as transforms
 import torch
-from torch.utils.data import DataLoader,Dataset
+from torch.utils.data import DataLoader, Dataset
 import random
 import os
+import json
 from PIL import Image
 import matplotlib.pyplot as plt
 import numpy as np
 from torch.utils.data.sampler import Sampler
 
-def imshow(img):
-    npimg = img.numpy()
-    plt.axis("off")
-    plt.imshow(np.transpose(npimg,(1,2,0)))
-    plt.show()
 
-class Rotate(object):
-    def __init__(self, angle):
-        self.angle = angle
-    def __call__(self, x, mode="reflect"):
-        x = x.rotate(self.angle)
-        return x
+# ══════════════════════════════════════════════════════════════════════════════
+#  Hàm đọc split
+# ══════════════════════════════════════════════════════════════════════════════
 
-def mini_imagenet_folders():
-    train_folder = '../datas/miniImagenet/train'
-    test_folder = '../datas/miniImagenet/val'
+def mini_imagenet_folders(train_root='../datas/miniImagenet/train',
+                          test_root='../datas/miniImagenet/val'):
+    """
+    Cách đọc gốc: quét thư mục train/ và val/ (backward compatible).
+    """
+    metatrain_folders = [
+        os.path.join(train_root, label)
+        for label in os.listdir(train_root)
+        if os.path.isdir(os.path.join(train_root, label))
+    ]
+    metatest_folders = [
+        os.path.join(test_root, label)
+        for label in os.listdir(test_root)
+        if os.path.isdir(os.path.join(test_root, label))
+    ]
+    random.seed(1)
+    random.shuffle(metatrain_folders)
+    random.shuffle(metatest_folders)
+    return metatrain_folders, metatest_folders
 
-    metatrain_folders = [os.path.join(train_folder, label) \
-                for label in os.listdir(train_folder) \
-                if os.path.isdir(os.path.join(train_folder, label)) \
-                ]
-    metatest_folders = [os.path.join(test_folder, label) \
-                for label in os.listdir(test_folder) \
-                if os.path.isdir(os.path.join(test_folder, label)) \
-                ]
+
+def mini_imagenet_folders_from_split_json(json_path, data_root,
+                                          train_key='train', test_key='val'):
+    """
+    Format 1 – Split-list JSON.
+
+    json_path : đường dẫn tới file JSON chứa keys 'train'/'val'/'test'
+    data_root : thư mục gốc chứa các class folder
+                Ví dụ: /data/miniImagenet/  (bên trong có n01532829/, n01558993/, ...)
+    train_key : key dùng cho meta-train  (mặc định 'train')
+    test_key  : key dùng cho meta-test   (mặc định 'val')
+
+    Trả về: (metatrain_folders, metatest_folders)
+            mỗi phần tử là đường dẫn tuyệt đối tới thư mục class
+    """
+    with open(json_path, 'r') as f:
+        split_dict = json.load(f)
+
+    if train_key not in split_dict:
+        raise KeyError(f"Key '{train_key}' không tìm thấy trong {json_path}. "
+                       f"Các key hiện có: {list(split_dict.keys())}")
+    if test_key not in split_dict:
+        raise KeyError(f"Key '{test_key}' không tìm thấy trong {json_path}. "
+                       f"Các key hiện có: {list(split_dict.keys())}")
+
+    def to_abs(class_names):
+        folders = []
+        for cls in class_names:
+            path = os.path.join(data_root, cls)
+            if not os.path.isdir(path):
+                raise FileNotFoundError(
+                    f"Không tìm thấy thư mục class: {path}\n"
+                    f"Kiểm tra lại data_root='{data_root}' hoặc tên class trong JSON.")
+            folders.append(path)
+        return folders
+
+    metatrain_folders = to_abs(split_dict[train_key])
+    metatest_folders  = to_abs(split_dict[test_key])
 
     random.seed(1)
     random.shuffle(metatrain_folders)
     random.shuffle(metatest_folders)
 
-    return metatrain_folders,metatest_folders
+    return metatrain_folders, metatest_folders
+
+
+def mini_imagenet_folders_from_image_json(train_json, test_json, data_root):
+    """
+    Format 2 – Image-list JSON (kiểu Chen et al. / FEAT).
+
+    Mỗi file JSON chứa:
+        {
+          "label_names": ["class_A", "class_B", ...],
+          "image_names": ["class_A/img001.jpg", "class_A/img002.jpg", ...],
+          "image_labels": [0, 0, ...]
+        }
+
+    Trả về dict thay vì list thư mục vì ảnh không cần phân thư mục.
+    Dùng kết hợp với MiniImagenetTaskFromImageList (xem bên dưới).
+    """
+    def load(json_path):
+        with open(json_path, 'r') as f:
+            d = json.load(f)
+        required = {'label_names', 'image_names', 'image_labels'}
+        missing  = required - set(d.keys())
+        if missing:
+            raise KeyError(f"JSON thiếu các key: {missing}. File: {json_path}")
+        return d
+
+    train_data = load(train_json)
+    test_data  = load(test_json)
+
+    def build_class_map(data):
+        """Nhóm image paths theo class."""
+        class_to_images = {}
+        for img_name, label_idx in zip(data['image_names'], data['image_labels']):
+            cls = data['label_names'][label_idx]
+            if cls not in class_to_images:
+                class_to_images[cls] = []
+            class_to_images[cls].append(os.path.join(data_root, img_name))
+        return class_to_images  # {class_name: [abs_path, ...]}
+
+    metatrain_map = build_class_map(train_data)
+    metatest_map  = build_class_map(test_data)
+    return metatrain_map, metatest_map
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Task: dùng với Format 1 hoặc folder gốc (list of class folders)
+# ══════════════════════════════════════════════════════════════════════════════
 
 class MiniImagenetTask(object):
-
-    def __init__(self, character_folders, num_classes, train_num,test_num):
-
+    """
+    Tạo một episode từ danh sách thư mục class.
+    Dùng cho mini_imagenet_folders() và mini_imagenet_folders_from_split_json().
+    """
+    def __init__(self, character_folders, num_classes, train_num, test_num):
         self.character_folders = character_folders
         self.num_classes = num_classes
-        self.train_num = train_num
-        self.test_num = test_num
+        self.train_num   = train_num
+        self.test_num    = test_num
 
-        class_folders = random.sample(self.character_folders,self.num_classes)
-        labels = np.array(range(len(class_folders)))
-        labels = dict(zip(class_folders, labels))
-        samples = dict()
+        class_folders = random.sample(self.character_folders, self.num_classes)
+        labels = dict(zip(class_folders, range(len(class_folders))))
+        samples = {}
 
         self.train_roots = []
-        self.test_roots = []
+        self.test_roots  = []
         for c in class_folders:
-
-            temp = [os.path.join(c, x) for x in os.listdir(c)]
-            samples[c] = random.sample(temp, len(temp))
-            random.shuffle(samples[c])
-
+            imgs = [os.path.join(c, x) for x in os.listdir(c)
+                    if not x.startswith('.')]
+            random.shuffle(imgs)
+            samples[c] = imgs
             self.train_roots += samples[c][:train_num]
-            self.test_roots += samples[c][train_num:train_num+test_num]
+            self.test_roots  += samples[c][train_num:train_num + test_num]
 
-        self.train_labels = [labels[self.get_class(x)] for x in self.train_roots]
-        self.test_labels = [labels[self.get_class(x)] for x in self.test_roots]
+        self.train_labels = [labels[self._get_class(x)] for x in self.train_roots]
+        self.test_labels  = [labels[self._get_class(x)] for x in self.test_roots]
 
-    def get_class(self, sample):
-        return os.path.join(*sample.split('/')[:-1])
+    def _get_class(self, sample):
+        # Works on both Linux and Windows paths
+        return os.path.dirname(sample)
 
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Task: dùng với Format 2 (image-list JSON)
+# ══════════════════════════════════════════════════════════════════════════════
+
+class MiniImagenetTaskFromImageList(object):
+    """
+    Tạo một episode từ dict {class_name: [image_paths]}.
+    Dùng cho mini_imagenet_folders_from_image_json().
+    """
+    def __init__(self, class_to_images, num_classes, train_num, test_num):
+        self.num_classes = num_classes
+        self.train_num   = train_num
+        self.test_num    = test_num
+
+        chosen_classes = random.sample(list(class_to_images.keys()), num_classes)
+        labels = dict(zip(chosen_classes, range(num_classes)))
+
+        self.train_roots  = []
+        self.test_roots   = []
+        self.train_labels = []
+        self.test_labels  = []
+
+        for cls in chosen_classes:
+            imgs = list(class_to_images[cls])
+            random.shuffle(imgs)
+            self.train_roots  += imgs[:train_num]
+            self.test_roots   += imgs[train_num:train_num + test_num]
+            self.train_labels += [labels[cls]] * train_num
+            self.test_labels  += [labels[cls]] * test_num
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Dataset classes
+# ══════════════════════════════════════════════════════════════════════════════
 
 class FewShotDataset(Dataset):
-
     def __init__(self, task, split='train', transform=None, target_transform=None):
-        self.transform = transform # Torch operations on the input image
+        self.transform        = transform
         self.target_transform = target_transform
-        self.task = task
-        self.split = split
-        self.image_roots = self.task.train_roots if self.split == 'train' else self.task.test_roots
-        self.labels = self.task.train_labels if self.split == 'train' else self.task.test_labels
+        self.task             = task
+        self.split            = split
+        self.image_roots = task.train_roots if split == 'train' else task.test_roots
+        self.labels      = task.train_labels if split == 'train' else task.test_labels
 
     def __len__(self):
         return len(self.image_roots)
 
     def __getitem__(self, idx):
-        raise NotImplementedError("This is an abstract class. Subclass this class for your particular dataset.")
+        raise NotImplementedError("Abstract class.")
+
 
 class MiniImagenet(FewShotDataset):
-
-    def __init__(self, *args, **kwargs):
-        super(MiniImagenet, self).__init__(*args, **kwargs)
-
     def __getitem__(self, idx):
-        image_root = self.image_roots[idx]
-        image = Image.open(image_root)
-        image = image.convert('RGB')
+        image = Image.open(self.image_roots[idx]).convert('RGB')
         if self.transform is not None:
             image = self.transform(image)
         label = self.labels[idx]
@@ -108,24 +243,31 @@ class MiniImagenet(FewShotDataset):
         return image, label
 
 
-class ClassBalancedSampler(Sampler):
-    ''' Samples 'num_inst' examples each from 'num_cl' pools
-        of examples of size 'num_per_class' '''
+# ══════════════════════════════════════════════════════════════════════════════
+#  Sampler
+# ══════════════════════════════════════════════════════════════════════════════
 
-    def __init__(self, num_per_class, num_cl, num_inst,shuffle=True):
+class ClassBalancedSampler(Sampler):
+    """Samples num_per_class examples each from num_cl classes of size num_inst."""
+
+    def __init__(self, num_per_class, num_cl, num_inst, shuffle=True):
         self.num_per_class = num_per_class
-        self.num_cl = num_cl
-        self.num_inst = num_inst
-        self.shuffle = shuffle
+        self.num_cl        = num_cl
+        self.num_inst      = num_inst
+        self.shuffle       = shuffle
 
     def __iter__(self):
-        # return a single list of indices, assuming that items will be grouped by class
         if self.shuffle:
-            batch = [[i+j*self.num_inst for i in torch.randperm(self.num_inst)[:self.num_per_class]] for j in range(self.num_cl)]
+            batch = [
+                [i + j * self.num_inst for i in torch.randperm(self.num_inst)[:self.num_per_class]]
+                for j in range(self.num_cl)
+            ]
         else:
-            batch = [[i+j*self.num_inst for i in range(self.num_inst)[:self.num_per_class]] for j in range(self.num_cl)]
+            batch = [
+                [i + j * self.num_inst for i in range(self.num_inst)[:self.num_per_class]]
+                for j in range(self.num_cl)
+            ]
         batch = [item for sublist in batch for item in sublist]
-
         if self.shuffle:
             random.shuffle(batch)
         return iter(batch)
@@ -134,17 +276,38 @@ class ClassBalancedSampler(Sampler):
         return 1
 
 
-def get_mini_imagenet_data_loader(task, num_per_class=1, split='train',shuffle = False):
-    normalize = transforms.Normalize(mean=[0.92206, 0.92206, 0.92206], std=[0.08426, 0.08426, 0.08426])
+# ══════════════════════════════════════════════════════════════════════════════
+#  DataLoader helper
+# ══════════════════════════════════════════════════════════════════════════════
 
-    dataset = MiniImagenet(task,split=split,transform=transforms.Compose([transforms.ToTensor(),normalize]))
+# Normalization stats (mean/std tính trên mini-ImageNet)
+_NORMALIZE = transforms.Normalize(
+    mean=[0.485, 0.456, 0.406],
+    std=[0.229, 0.224, 0.225]
+)
 
-    if split == 'train':
-        sampler = ClassBalancedSampler(num_per_class, task.num_classes, task.train_num,shuffle=shuffle)
-    else:
-        sampler = ClassBalancedSampler(num_per_class, task.num_classes, task.test_num,shuffle=shuffle)
+def get_mini_imagenet_data_loader(task, num_per_class=1, split='train',
+                                  shuffle=False, image_size=84):
+    """
+    Trả về DataLoader cho một episode đã tạo sẵn (task).
+    Tương thích với cả MiniImagenetTask và MiniImagenetTaskFromImageList.
+    """
+    transform = transforms.Compose([
+        transforms.Resize((image_size, image_size)),
+        transforms.ToTensor(),
+        _NORMALIZE,
+    ])
 
-    loader = DataLoader(dataset, batch_size=num_per_class*task.num_classes, sampler=sampler)
+    dataset = MiniImagenet(task, split=split, transform=transform)
 
-    return loader
+    num_inst = task.train_num if split == 'train' else task.test_num
+    sampler  = ClassBalancedSampler(
+        num_per_class, task.num_classes, num_inst, shuffle=shuffle)
 
+    return DataLoader(
+        dataset,
+        batch_size=num_per_class * task.num_classes,
+        sampler=sampler,
+        num_workers=0,    # tăng lên nếu cần tốc độ
+        pin_memory=True,
+    )
