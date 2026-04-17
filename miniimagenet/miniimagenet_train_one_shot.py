@@ -214,7 +214,7 @@ def main():
     log_path = os.path.join(LOG_DIR,
                             f"miniimagenet_1shot_{CLASS_NUM}way_train_log.csv")
     log_file = open(log_path, "w")
-    log_file.write("episode,loss,test_accuracy,h\n")
+    log_file.write("episode,loss,train_accuracy,test_accuracy,h\n")
     print(f"[INFO] Models will be saved to : {MODEL_DIR}")
     print(f"[INFO] Logs  will be saved to  : {LOG_DIR}")
 
@@ -298,6 +298,7 @@ def main():
     # ── Step 3: training loop ────────────────────────────────────────────
     print("Training...")
     last_accuracy = 0.0
+    running_train_acc = 0.0
     mse = nn.MSELoss().to(device)
 
     for episode in range(EPISODE):
@@ -339,6 +340,14 @@ def main():
 
         loss = mse(relations, one_hot_labels)
 
+        # ── Calculate Training Accuracy ──────────────────────────────────
+        _, predict_labels = torch.max(relations, 1)
+        # batch_labels đang ở CPU, predict_labels ở GPU -> đưa về cùng chỗ
+        rewards = [1 if predict_labels[j].cpu() == batch_labels[j] else 0 
+                   for j in range(BATCH_NUM_PER_CLASS * CLASS_NUM)]
+        train_acc = np.sum(rewards) / (BATCH_NUM_PER_CLASS * CLASS_NUM)
+        running_train_acc += train_acc
+
         feature_encoder.zero_grad()
         relation_network.zero_grad()
         loss.backward()
@@ -350,7 +359,9 @@ def main():
         relation_network_optim.step()
 
         if (episode + 1) % 100 == 0:
-            print(f"episode: {episode+1}  loss: {loss.item():.6f}")
+            avg_train_acc = running_train_acc / 100
+            print(f"episode: {episode+1}  loss: {loss.item():.6f}  train_acc: {avg_train_acc:.4f}")
+            running_train_acc = 0.0
 
         # ── Periodic evaluation ──────────────────────────────────────────
         if (episode + 1) % TEST_INTERVAL == 0:
@@ -402,10 +413,12 @@ def main():
             relation_network.train()
 
             test_accuracy, h = mean_confidence_interval(accuracies)
+            # Tính train_acc tạm thời tại thời điểm log (dùng giá trị tập test gần nhất nếu cần)
+            # Nhưng tốt nhất là lưu giá trị running_train_acc trung bình
             print(f"test accuracy: {test_accuracy:.4f}  h: {h:.4f}")
 
-            # Write to log
-            log_file.write(f"{episode},{loss.item():.6f},{test_accuracy:.4f},{h:.4f}\n")
+            # Write to log (Lấy loss hiện tại và test_acc vừa tính)
+            log_file.write(f"{episode+1},{loss.item():.6f},{avg_train_acc:.4f},{test_accuracy:.4f},{h:.4f}\n")
             log_file.flush()
 
             if test_accuracy > last_accuracy:
