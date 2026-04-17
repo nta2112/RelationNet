@@ -24,8 +24,10 @@ parser.add_argument("-r","--relation_dim",   type=int,   default=8)
 parser.add_argument("-w","--class_num",      type=int,   default=5)
 parser.add_argument("-s","--sample_num_per_class", type=int, default=1)
 parser.add_argument("-b","--batch_num_per_class",  type=int, default=15)
-parser.add_argument("-e","--episode",        type=int,   default=500000)
-parser.add_argument("-t","--test_episode",   type=int,   default=600)
+parser.add_argument("-e","--episode",        type=int,   default=3000)
+parser.add_argument("-t","--test_episode",   type=int,   default=50)
+parser.add_argument("--test_interval", type=int,   default=100,
+                    help="Evaluate every N episodes (default: 100)")
 parser.add_argument("-l","--learning_rate",  type=float, default=0.001)
 parser.add_argument("-g","--gpu",            type=int,   default=0)
 parser.add_argument("-u","--hidden_unit",    type=int,   default=10)
@@ -78,6 +80,7 @@ TRAIN_KEY            = args.train_key
 TEST_KEY             = args.test_key
 BACKBONE             = args.backbone
 USE_PRETRAINED       = args.pretrained
+TEST_INTERVAL        = args.test_interval
 # IMAGE_SIZE: dùng giá trị người dùng chỉ định, hoặc tự động theo backbone
 IMAGE_SIZE           = args.image_size if args.image_size is not None else (
                            224 if args.backbone == "resnet50" else 84)
@@ -350,7 +353,7 @@ def main():
             print(f"episode: {episode+1}  loss: {loss.item():.6f}")
 
         # ── Periodic evaluation ──────────────────────────────────────────
-        if episode % 5000 == 0:
+        if (episode + 1) % TEST_INTERVAL == 0:
             print("Testing...")
             accuracies = []
             feature_encoder.eval()
