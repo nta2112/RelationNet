@@ -11,7 +11,7 @@ import torch.nn.functional as F
 from torch.optim.lr_scheduler import StepLR
 import torchvision.models as models
 import numpy as np
-import task_generator_test as tg
+import task_generator as tg
 import os
 import math
 import argparse
