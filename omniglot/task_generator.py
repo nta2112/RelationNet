@@ -31,7 +31,6 @@ def omniglot_character_folders():
                 for family in os.listdir(data_folder) \
                 if os.path.isdir(os.path.join(data_folder, family)) \
                 for character in os.listdir(os.path.join(data_folder, family))]
-    random.seed(1)
     random.shuffle(character_folders)
 
     num_train = 1200

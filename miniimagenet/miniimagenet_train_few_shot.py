@@ -57,6 +57,8 @@ parser.add_argument("--image_size",   type=int, default=None,
                     help="Input image size (default: 84 for conv4, 224 for resnet50)")
 parser.add_argument("--pretrained",   action="store_true", default=True,
                     help="Use ImageNet pretrained weights for resnet50 (default: True)")
+parser.add_argument("--seed", type=int, default=None,
+                    help="Random seed for reproducibility")
 args = parser.parse_args()
 
 # Hyper Parameters
@@ -194,7 +196,20 @@ def weights_init(m):
         m.bias.data = torch.ones(m.bias.data.size())
 
 
+def set_seed(seed):
+    if seed is not None:
+        import random
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+        print(f"[INFO] Set seed to: {seed}")
+
 def main():
+    set_seed(args.seed)
     # ── Create output directories ────────────────────────────────────────
     os.makedirs(MODEL_DIR, exist_ok=True)
     os.makedirs(LOG_DIR,   exist_ok=True)

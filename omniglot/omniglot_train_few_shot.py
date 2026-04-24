@@ -29,6 +29,7 @@ parser.add_argument("-t","--test_episode", type = int, default = 1000)
 parser.add_argument("-l","--learning_rate", type = float, default = 0.001)
 parser.add_argument("-g","--gpu",type=int, default=0)
 parser.add_argument("-u","--hidden_unit",type=int,default=10)
+parser.add_argument("--seed", type=int, default=None, help="Random seed for reproducibility")
 args = parser.parse_args()
 
 
@@ -115,7 +116,20 @@ def weights_init(m):
         m.weight.data.normal_(0, 0.01)
         m.bias.data = torch.ones(m.bias.data.size())
 
+def set_seed(seed):
+    if seed is not None:
+        import random
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+        print(f"[INFO] Set seed to: {seed}")
+
 def main():
+    set_seed(args.seed)
     # Step 1: init data folders
     print("init data folders")
     # init character folders for dataset construction

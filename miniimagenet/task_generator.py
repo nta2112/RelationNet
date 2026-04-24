@@ -52,7 +52,6 @@ def mini_imagenet_folders(train_root='../datas/miniImagenet/train',
         for label in os.listdir(test_root)
         if os.path.isdir(os.path.join(test_root, label))
     ]
-    random.seed(1)
     random.shuffle(metatrain_folders)
     random.shuffle(metatest_folders)
     return metatrain_folders, metatest_folders
@@ -96,7 +95,6 @@ def mini_imagenet_folders_from_split_json(json_path, data_root,
     metatrain_folders = to_abs(split_dict[train_key])
     metatest_folders  = to_abs(split_dict[test_key])
 
-    random.seed(1)
     random.shuffle(metatrain_folders)
     random.shuffle(metatest_folders)
 
