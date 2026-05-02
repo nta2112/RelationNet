@@ -120,11 +120,13 @@ def mini_imagenet_folders_from_image_json(train_json, test_json, data_root):
         """Nhóm image paths theo class."""
         class_to_images = {}
         for img_name, label_idx in zip(data['image_names'], data['image_labels']):
+            if not img_name.lower().endswith(('.jpg', '.jpeg', '.png', '.bmp')):
+                continue
             cls = data['label_names'][label_idx]
             if cls not in class_to_images:
                 class_to_images[cls] = []
             class_to_images[cls].append(os.path.join(data_root, img_name))
-        return class_to_images  # {class_name: [abs_path, ...]}
+        return class_to_images
 
     metatrain_map = build_class_map(train_data)
     metatest_map  = build_class_map(test_data)
@@ -154,7 +156,7 @@ class MiniImagenetTask(object):
         self.test_roots  = []
         for c in class_folders:
             imgs = [os.path.join(c, x) for x in os.listdir(c)
-                    if not x.startswith('.')]
+                    if x.lower().endswith(('.jpg', '.jpeg', '.png', '.bmp'))]
             random.shuffle(imgs)
             samples[c] = imgs
             self.train_roots += samples[c][:train_num]
