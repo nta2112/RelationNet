@@ -58,47 +58,36 @@ def mini_imagenet_folders(train_root='../datas/miniImagenet/train',
 
 
 def mini_imagenet_folders_from_split_json(json_path, data_root,
-                                          train_key='train', test_key='val'):
+                                          train_key='train', val_key='val', test_key='test'):
     """
     Format 1 – Split-list JSON.
-
-    json_path : đường dẫn tới file JSON chứa keys 'train'/'val'/'test'
-    data_root : thư mục gốc chứa các class folder
-                Ví dụ: /data/miniImagenet/  (bên trong có n01532829/, n01558993/, ...)
-    train_key : key dùng cho meta-train  (mặc định 'train')
-    test_key  : key dùng cho meta-test   (mặc định 'val')
-
-    Trả về: (metatrain_folders, metatest_folders)
-            mỗi phần tử là đường dẫn tuyệt đối tới thư mục class
+    Returns: (metatrain_folders, metaval_folders, metatest_folders)
     """
     with open(json_path, 'r') as f:
         split_dict = json.load(f)
 
-    if train_key not in split_dict:
-        raise KeyError(f"Key '{train_key}' không tìm thấy trong {json_path}. "
-                       f"Các key hiện có: {list(split_dict.keys())}")
-    if test_key not in split_dict:
-        raise KeyError(f"Key '{test_key}' không tìm thấy trong {json_path}. "
-                       f"Các key hiện có: {list(split_dict.keys())}")
-
-    def to_abs(class_names):
+    def to_abs(key):
+        if key not in split_dict:
+            return []
+        class_names = split_dict[key]
         folders = []
         for cls in class_names:
             path = os.path.join(data_root, cls)
             if not os.path.isdir(path):
-                raise FileNotFoundError(
-                    f"Không tìm thấy thư mục class: {path}\n"
-                    f"Kiểm tra lại data_root='{data_root}' hoặc tên class trong JSON.")
+                print(f"[WARNING] Folder not found: {path}")
+                continue
             folders.append(path)
         return folders
 
-    metatrain_folders = to_abs(split_dict[train_key])
-    metatest_folders  = to_abs(split_dict[test_key])
+    metatrain_folders = to_abs(train_key)
+    metaval_folders   = to_abs(val_key)
+    metatest_folders  = to_abs(test_key)
 
     random.shuffle(metatrain_folders)
+    random.shuffle(metaval_folders)
     random.shuffle(metatest_folders)
 
-    return metatrain_folders, metatest_folders
+    return metatrain_folders, metaval_folders, metatest_folders
 
 
 def mini_imagenet_folders_from_image_json(train_json, test_json, data_root):
@@ -230,11 +219,20 @@ class FewShotDataset(Dataset):
         raise NotImplementedError("Abstract class.")
 
 
+# Global cache to store resized images in RAM
+_IMAGE_CACHE = {}
+
 class MiniImagenet(FewShotDataset):
     def __getitem__(self, idx):
-        image = Image.open(self.image_roots[idx]).convert('RGB')
-        if self.transform is not None:
-            image = self.transform(image)
+        path = self.image_roots[idx]
+        if path in _IMAGE_CACHE:
+            image = _IMAGE_CACHE[path]
+        else:
+            image = Image.open(path).convert('RGB')
+            if self.transform is not None:
+                image = self.transform(image)
+            _IMAGE_CACHE[path] = image
+            
         label = self.labels[idx]
         if self.target_transform is not None:
             label = self.target_transform(label)

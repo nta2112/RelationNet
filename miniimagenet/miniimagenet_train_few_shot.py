@@ -59,6 +59,8 @@ parser.add_argument("--pretrained",   action="store_true", default=True,
                     help="Use ImageNet pretrained weights for resnet50 (default: True)")
 parser.add_argument("--seed", type=int, default=None,
                     help="Random seed for reproducibility")
+parser.add_argument("--batch_size", type=int, default=1,
+                    help="Number of episodes per update (default: 1)")
 args = parser.parse_args()
 
 # Hyper Parameters
@@ -228,10 +230,11 @@ def main():
         if DATA_ROOT is None:
             raise ValueError("--data_root bắt buộc khi dùng --split_file")
         print(f"[INFO] Đọc split từ JSON (Format 1): {SPLIT_FILE}")
-        metatrain_folders, metatest_folders = tg.mini_imagenet_folders_from_split_json(
-            SPLIT_FILE, DATA_ROOT, train_key=TRAIN_KEY, test_key=TEST_KEY)
-        print(f"       meta-train: {len(metatrain_folders)} classes, "
-              f"meta-test: {len(metatest_folders)} classes")
+        metatrain_folders, metaval_folders, metatest_folders = tg.mini_imagenet_folders_from_split_json(
+            SPLIT_FILE, DATA_ROOT, train_key=TRAIN_KEY, val_key=TEST_KEY, test_key="test")
+        print(f"       meta-train: {len(metatrain_folders)} classes")
+        print(f"       meta-val  : {len(metaval_folders)} classes")
+        print(f"       meta-test : {len(metatest_folders)} classes")
 
     elif TRAIN_JSON is not None and TEST_JSON is not None:
         if DATA_ROOT is None:
@@ -293,9 +296,10 @@ def main():
     # ── Step 3: training loop ────────────────────────────────────────────
     print("Training...")
     last_accuracy = 0.0
-    running_train_acc = 0.0
-    mse = nn.MSELoss().to(device)
-
+    accumulation_steps = args.batch_size
+    feature_encoder_optim.zero_grad()
+    relation_network_optim.zero_grad()
+    
     for episode in range(EPISODE):
         feature_encoder_scheduler.step(episode)
         relation_network_scheduler.step(episode)
@@ -336,6 +340,10 @@ def main():
         ).scatter_(1, batch_labels.view(-1, 1), 1).to(device)
 
         loss = mse(relations, one_hot_labels)
+        
+        # Scale loss for accumulation
+        loss = loss / accumulation_steps
+        loss.backward()
 
         # ── Calculate Training Accuracy ──────────────────────────────────
         _, predict_labels = torch.max(relations, 1)
@@ -344,19 +352,19 @@ def main():
         train_acc = np.sum(rewards) / (BATCH_NUM_PER_CLASS * CLASS_NUM)
         running_train_acc += train_acc
 
-        feature_encoder.zero_grad()
-        relation_network.zero_grad()
-        loss.backward()
-
-        torch.nn.utils.clip_grad_norm_(feature_encoder.parameters(),  0.5)
-        torch.nn.utils.clip_grad_norm_(relation_network.parameters(), 0.5)
-
-        feature_encoder_optim.step()
-        relation_network_optim.step()
+        # Update weights if we've accumulated enough episodes
+        if (episode + 1) % accumulation_steps == 0:
+            torch.nn.utils.clip_grad_norm_(feature_encoder.parameters(),  0.5)
+            torch.nn.utils.clip_grad_norm_(relation_network.parameters(), 0.5)
+            feature_encoder_optim.step()
+            relation_network_optim.step()
+            feature_encoder_optim.zero_grad()
+            relation_network_optim.zero_grad()
 
         if (episode + 1) % 100 == 0:
             avg_train_acc = running_train_acc / 100
-            print(f"episode: {episode+1}  loss: {loss.item():.6f}  train_acc: {avg_train_acc:.4f}")
+            # Multiply loss back by accumulation_steps for logging original value
+            print(f"episode: {episode+1}  loss: {loss.item() * accumulation_steps:.6f}  train_acc: {avg_train_acc:.4f}")
             running_train_acc = 0.0
 
         # ── Periodic evaluation ──────────────────────────────────────────
@@ -423,7 +431,70 @@ def main():
                 last_accuracy = test_accuracy
 
     log_file.close()
-    print("Training complete.")
+    
+    # ── Step 4: Final Evaluation on Meta-Test Split ─────────────────────
+    if len(metatest_folders) > 0:
+        print("\n" + "="*30)
+        print("STARTING FINAL EVALUATION ON TEST SPLIT")
+        print("="*30)
+        
+        # Load the best model found during training
+        if os.path.exists(enc_ckpt):
+            feature_encoder.load_state_dict(torch.load(enc_ckpt, map_location=device))
+        if os.path.exists(net_ckpt):
+            relation_network.load_state_dict(torch.load(net_ckpt, map_location=device))
+            
+        accuracies = []
+        feature_encoder.eval()
+        relation_network.eval()
+        
+        # Research standard: 600 episodes for final testing
+        NUM_FINAL_TEST = 600
+        with torch.no_grad():
+            for i in range(NUM_FINAL_TEST):
+                total_rewards = 0
+                counter = 0
+                task = TaskClass(metatest_folders, CLASS_NUM, SAMPLE_NUM_PER_CLASS, 15)
+                sample_dataloader = tg.get_mini_imagenet_data_loader(
+                    task, num_per_class=SAMPLE_NUM_PER_CLASS, split="train", shuffle=False,
+                    image_size=IMAGE_SIZE)
+                test_dataloader   = tg.get_mini_imagenet_data_loader(
+                    task, num_per_class=5, split="test", shuffle=False,
+                    image_size=IMAGE_SIZE)
+
+                sample_images, _ = next(iter(sample_dataloader))
+                for test_images, test_labels in test_dataloader:
+                    batch_size = test_labels.shape[0]
+                    sample_features = feature_encoder(sample_images.to(device))
+                    test_features   = feature_encoder(test_images.to(device))
+                    _, C, fH, fW    = sample_features.shape
+
+                    sample_features_ext = sample_features.view(CLASS_NUM, SAMPLE_NUM_PER_CLASS, C, fH, fW)
+                    sample_features_ext = torch.sum(sample_features_ext, 1).squeeze(1)
+                    sample_features_ext = sample_features_ext.unsqueeze(0).repeat(batch_size, 1, 1, 1, 1)
+                    
+                    test_features_ext = test_features.unsqueeze(0).repeat(CLASS_NUM, 1, 1, 1, 1)
+                    test_features_ext = torch.transpose(test_features_ext, 0, 1)
+
+                    relation_pairs = torch.cat((sample_features_ext, test_features_ext), 2).view(-1, C * 2, fH, fW)
+                    relations = relation_network(relation_pairs).view(-1, CLASS_NUM)
+
+                    _, predict_labels = torch.max(relations, 1)
+                    rewards = [1 if predict_labels[j] == test_labels[j] else 0 for j in range(batch_size)]
+                    total_rewards += np.sum(rewards)
+                    counter += batch_size
+
+                accuracies.append(total_rewards / float(counter))
+                if (i + 1) % 100 == 0:
+                    print(f"Test Episode [{i+1}/{NUM_FINAL_TEST}] Running Accuracy: {np.mean(accuracies):.4f}")
+
+        test_accuracy, h = mean_confidence_interval(accuracies)
+        print("\n" + "="*30)
+        print(f"FINAL TEST RESULT ({CLASS_NUM}way {SAMPLE_NUM_PER_CLASS}shot)")
+        print(f"Accuracy: {test_accuracy:.4f} +/- {h:.4f}")
+        print("="*30)
+
+    print("Training and Testing complete.")
 
 
 if __name__ == '__main__':
