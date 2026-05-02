@@ -299,10 +299,11 @@ def main():
     accumulation_steps = args.batch_size
     feature_encoder_optim.zero_grad()
     relation_network_optim.zero_grad()
-    
+    mse = nn.MSELoss().to(device)
+    running_train_acc = 0.0
+    avg_train_acc = 0.0
+
     for episode in range(EPISODE):
-        feature_encoder_scheduler.step(episode)
-        relation_network_scheduler.step(episode)
 
         task = TaskClass(
             metatrain_folders, CLASS_NUM, SAMPLE_NUM_PER_CLASS, BATCH_NUM_PER_CLASS)
@@ -358,6 +359,8 @@ def main():
             torch.nn.utils.clip_grad_norm_(relation_network.parameters(), 0.5)
             feature_encoder_optim.step()
             relation_network_optim.step()
+            feature_encoder_scheduler.step()
+            relation_network_scheduler.step()
             feature_encoder_optim.zero_grad()
             relation_network_optim.zero_grad()
 
