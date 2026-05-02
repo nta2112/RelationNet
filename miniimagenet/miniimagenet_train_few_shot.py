@@ -379,13 +379,15 @@ def main():
             with torch.no_grad():
                 for _ in range(TEST_EPISODE):
                     total_rewards = 0
+                    counter = 0
+                    VAL_QUERY_NUM = 15
                     task = TaskClass(
-                        metatest_folders, CLASS_NUM, SAMPLE_NUM_PER_CLASS, 15)
+                        metatest_folders, CLASS_NUM, SAMPLE_NUM_PER_CLASS, VAL_QUERY_NUM)
                     sample_dataloader = tg.get_mini_imagenet_data_loader(
                         task, num_per_class=SAMPLE_NUM_PER_CLASS, split="train", shuffle=False,
                         image_size=IMAGE_SIZE)
                     test_dataloader   = tg.get_mini_imagenet_data_loader(
-                        task, num_per_class=5, split="test", shuffle=False,
+                        task, num_per_class=VAL_QUERY_NUM, split="test", shuffle=False,
                         image_size=IMAGE_SIZE)
 
                     sample_images, _ = next(iter(sample_dataloader))
@@ -415,8 +417,9 @@ def main():
                             for j in range(batch_size)
                         ]
                         total_rewards += np.sum(rewards)
+                        counter += batch_size
 
-                    accuracies.append(total_rewards / float(CLASS_NUM * 15))
+                    accuracies.append(total_rewards / float(counter))
 
             feature_encoder.train()
             relation_network.train()
