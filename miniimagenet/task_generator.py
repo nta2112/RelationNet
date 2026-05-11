@@ -206,8 +206,9 @@ class MiniImagenetTaskFromImageList(object):
 # ══════════════════════════════════════════════════════════════════════════════
 
 class FewShotDataset(Dataset):
-    def __init__(self, task, split='train', transform=None, target_transform=None):
-        self.transform        = transform
+    def __init__(self, task, split='train', transform=None, resize_transform=None, target_transform=None):
+        self.transform        = transform  # Đây là aug_transform
+        self.resize_transform = resize_transform
         self.target_transform = target_transform
         self.task             = task
         self.split            = split
@@ -227,13 +228,30 @@ _IMAGE_CACHE = {}
 class MiniImagenet(FewShotDataset):
     def __getitem__(self, idx):
         path = self.image_roots[idx]
+        
+        # 1. Lấy ảnh từ cache hoặc disk
         if path in _IMAGE_CACHE:
             image = _IMAGE_CACHE[path]
         else:
             image = Image.open(path).convert('RGB')
-            if self.transform is not None:
-                image = self.transform(image)
-            _IMAGE_CACHE[path] = image
+            if self.resize_transform is not None:
+                image = self.resize_transform(image)
+            
+            # Cache: 
+            # - Train: cache PIL sau resize để vẫn có thể augment ngẫu nhiên
+            # - Val/Test: cache thẳng tensor sau khi augment (vì deterministic)
+            if self.split == 'train':
+                _IMAGE_CACHE[path] = image
+            else:
+                # Với Val/Test, áp dụng nốt aug_transform trước khi cache
+                if self.transform is not None:
+                    image = self.transform(image)
+                _IMAGE_CACHE[path] = image
+                
+        # 2. Áp dụng augmentation (chỉ thực hiện với Train vì Val đã cache tensor)
+        # Nếu image là PIL (thường là tập train), ta áp dụng transform
+        if self.split == 'train' and self.transform is not None:
+            image = self.transform(image)
             
         label = self.labels[idx]
         if self.target_transform is not None:
@@ -288,15 +306,29 @@ def get_mini_imagenet_data_loader(task, num_per_class=1, split='train',
                                   shuffle=False, image_size=84):
     """
     Trả về DataLoader cho một episode đã tạo sẵn (task).
-    Tương thích với cả MiniImagenetTask và MiniImagenetTaskFromImageList.
+    Sử dụng phương pháp tiền xử lý và augmentation từ AGNN.
     """
-    transform = transforms.Compose([
-        transforms.Resize((image_size, image_size)),
-        transforms.ToTensor(),
-        _NORMALIZE,
-    ])
+    # Box size thường lớn hơn image size một chút để crop
+    box_size = int(image_size * 1.15) if image_size > 0 else 96
+    
+    resize_transform = transforms.Resize((box_size, box_size))
+    
+    if split == 'train':
+        aug_transform = transforms.Compose([
+            transforms.RandomResizedCrop(image_size, scale=(0.8, 1.0)),
+            transforms.RandomHorizontalFlip(),
+            transforms.ColorJitter(brightness=.1, contrast=.1, saturation=.1, hue=.1),
+            transforms.ToTensor(),
+            _NORMALIZE,
+        ])
+    else:
+        aug_transform = transforms.Compose([
+            transforms.CenterCrop(image_size),
+            transforms.ToTensor(),
+            _NORMALIZE,
+        ])
 
-    dataset = MiniImagenet(task, split=split, transform=transform)
+    dataset = MiniImagenet(task, split=split, transform=aug_transform, resize_transform=resize_transform)
 
     num_inst = task.train_num if split == 'train' else task.test_num
     sampler  = ClassBalancedSampler(
