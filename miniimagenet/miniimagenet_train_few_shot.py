@@ -413,7 +413,7 @@ def main():
 
                         _, predict_labels = torch.max(relations, 1)
                         rewards = [
-                            1 if predict_labels[j] == test_labels[j] else 0
+                            1 if predict_labels[j].cpu() == test_labels[j] else 0
                             for j in range(batch_size)
                         ]
                         total_rewards += np.sum(rewards)
@@ -465,7 +465,7 @@ def main():
                     task, num_per_class=SAMPLE_NUM_PER_CLASS, split="train", shuffle=False,
                     image_size=IMAGE_SIZE)
                 test_dataloader   = tg.get_mini_imagenet_data_loader(
-                    task, num_per_class=5, split="test", shuffle=False,
+                    task, num_per_class=15, split="test", shuffle=False,
                     image_size=IMAGE_SIZE)
 
                 sample_images, _ = next(iter(sample_dataloader))
@@ -486,7 +486,7 @@ def main():
                     relations = relation_network(relation_pairs).view(-1, CLASS_NUM)
 
                     _, predict_labels = torch.max(relations, 1)
-                    rewards = [1 if predict_labels[j] == test_labels[j] else 0 for j in range(batch_size)]
+                    rewards = [1 if predict_labels[j].cpu() == test_labels[j] else 0 for j in range(batch_size)]
                     total_rewards += np.sum(rewards)
                     counter += batch_size
 
