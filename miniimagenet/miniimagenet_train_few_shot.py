@@ -382,7 +382,7 @@ def main():
                     counter = 0
                     VAL_QUERY_NUM = 15
                     task = TaskClass(
-                        metatest_folders, CLASS_NUM, SAMPLE_NUM_PER_CLASS, VAL_QUERY_NUM)
+                        metaval_folders, CLASS_NUM, SAMPLE_NUM_PER_CLASS, VAL_QUERY_NUM)
                     sample_dataloader = tg.get_mini_imagenet_data_loader(
                         task, num_per_class=SAMPLE_NUM_PER_CLASS, split="train", shuffle=False,
                         image_size=IMAGE_SIZE)
