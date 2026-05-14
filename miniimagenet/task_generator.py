@@ -229,28 +229,17 @@ class MiniImagenet(FewShotDataset):
     def __getitem__(self, idx):
         path = self.image_roots[idx]
         
-        # 1. Lấy ảnh từ cache hoặc disk
+        # 1. Lấy ảnh từ cache hoặc disk (luôn lưu PIL để tránh xung đột)
         if path in _IMAGE_CACHE:
             image = _IMAGE_CACHE[path]
         else:
             image = Image.open(path).convert('RGB')
             if self.resize_transform is not None:
                 image = self.resize_transform(image)
-            
-            # Cache: 
-            # - Train: cache PIL sau resize để vẫn có thể augment ngẫu nhiên
-            # - Val/Test: cache thẳng tensor sau khi augment (vì deterministic)
-            if self.split == 'train':
-                _IMAGE_CACHE[path] = image
-            else:
-                # Với Val/Test, áp dụng nốt aug_transform trước khi cache
-                if self.transform is not None:
-                    image = self.transform(image)
-                _IMAGE_CACHE[path] = image
+            _IMAGE_CACHE[path] = image
                 
-        # 2. Áp dụng augmentation (chỉ thực hiện với Train vì Val đã cache tensor)
-        # Nếu image là PIL (thường là tập train), ta áp dụng transform
-        if self.split == 'train' and self.transform is not None:
+        # 2. Áp dụng transform (bao gồm cả augmentation và chuyển sang Tensor)
+        if self.transform is not None:
             image = self.transform(image)
             
         label = self.labels[idx]
