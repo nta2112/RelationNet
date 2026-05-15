@@ -201,6 +201,94 @@ class MiniImagenetTaskFromImageList(object):
             self.test_labels  += [labels[cls]] * test_num
 
 
+class OpenWorldMiniImagenetTask(object):
+    """
+    Tạo một episode Open-World từ danh sách thư mục class.
+    Chọn N class "biết" (known) và M class "không biết" (unknown).
+    """
+    def __init__(self, character_folders, num_classes, num_unknown_classes, train_num, test_num, unknown_test_num):
+        self.character_folders = character_folders
+        self.num_classes = num_classes
+        self.num_unknown_classes = num_unknown_classes
+        self.train_num   = train_num
+        self.test_num    = test_num
+        self.unknown_test_num = unknown_test_num
+
+        # Chọn N class known và M class unknown từ danh sách
+        all_chosen = random.sample(self.character_folders, num_classes + num_unknown_classes)
+        known_folders = all_chosen[:num_classes]
+        unknown_folders = all_chosen[num_classes:]
+
+        labels = dict(zip(known_folders, range(len(known_folders))))
+        
+        self.train_roots = []
+        self.test_roots  = []
+        self.train_labels = []
+        self.test_labels  = []
+
+        # 1. Xử lý Known classes
+        for c in known_folders:
+            imgs = [os.path.join(c, x) for x in os.listdir(c)
+                    if x.lower().endswith(('.jpg', '.jpeg', '.png', '.bmp'))]
+            random.shuffle(imgs)
+            self.train_roots += imgs[:train_num]
+            self.test_roots  += imgs[train_num:train_num + test_num]
+            self.train_labels += [labels[c]] * train_num
+            self.test_labels  += [labels[c]] * test_num
+
+        # 2. Xử lý Unknown classes (chỉ đưa vào test_roots)
+        for c in unknown_folders:
+            imgs = [os.path.join(c, x) for x in os.listdir(c)
+                    if x.lower().endswith(('.jpg', '.jpeg', '.png', '.bmp'))]
+            random.shuffle(imgs)
+            # Gán nhãn -1 cho unknown
+            self.test_roots  += imgs[:unknown_test_num]
+            self.test_labels += [-1] * unknown_test_num
+
+    def _get_class(self, sample):
+        return os.path.dirname(sample)
+
+
+class OpenWorldMiniImagenetTaskFromImageList(object):
+    """
+    Tạo một episode Open-World từ dict {class_name: [image_paths]}.
+    """
+    def __init__(self, class_to_images, num_classes, num_unknown_classes, train_num, test_num, unknown_test_num):
+        self.num_classes = num_classes
+        self.num_unknown_classes = num_unknown_classes
+        self.train_num   = train_num
+        self.test_num    = test_num
+        self.unknown_test_num = unknown_test_num
+
+        all_keys = list(class_to_images.keys())
+        all_chosen = random.sample(all_keys, num_classes + num_unknown_classes)
+        known_classes = all_chosen[:num_classes]
+        unknown_classes = all_chosen[num_classes:]
+
+        labels = dict(zip(known_classes, range(num_classes)))
+
+        self.train_roots  = []
+        self.test_roots   = []
+        self.train_labels = []
+        self.test_labels  = []
+
+        # Known classes
+        for cls in known_classes:
+            imgs = list(class_to_images[cls])
+            random.shuffle(imgs)
+            self.train_roots  += imgs[:train_num]
+            self.test_roots   += imgs[train_num:train_num + test_num]
+            self.train_labels += [labels[cls]] * train_num
+            self.test_labels  += [labels[cls]] * test_num
+
+        # Unknown classes
+        for cls in unknown_classes:
+            imgs = list(class_to_images[cls])
+            random.shuffle(imgs)
+            self.test_roots  += imgs[:unknown_test_num]
+            self.test_labels += [-1] * unknown_test_num
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  Dataset classes
 # ══════════════════════════════════════════════════════════════════════════════
@@ -318,14 +406,27 @@ def get_mini_imagenet_data_loader(task, num_per_class=1, split='train',
         ])
 
     dataset = MiniImagenet(task, split=split, transform=aug_transform, resize_transform=resize_transform)
+    
+    if split == 'train':
+        num_cl   = task.num_classes
+        num_inst = task.train_num
+    else:
+        # Đối với split='test' (query set), có thể có thêm unknown classes
+        num_cl = getattr(task, 'num_classes', 0) + getattr(task, 'num_unknown_classes', 0)
+        
+        # Giả định số mẫu mỗi class là đồng nhất (hoặc lấy từ task.test_num)
+        # Nếu task là OpenWorld, ta hy vọng test_num == unknown_test_num để sampler chạy đúng
+        num_inst = task.test_num if hasattr(task, 'test_num') else 0
+        
+        if hasattr(task, 'unknown_test_num') and task.test_num != task.unknown_test_num:
+            print(f"[WARNING] test_num ({task.test_num}) != unknown_test_num ({task.unknown_test_num}). "
+                  "ClassBalancedSampler có thể hoạt động không chính xác.")
 
-    num_inst = task.train_num if split == 'train' else task.test_num
-    sampler  = ClassBalancedSampler(
-        num_per_class, task.num_classes, num_inst, shuffle=shuffle)
+    sampler = ClassBalancedSampler(num_per_class, num_cl, num_inst, shuffle=shuffle)
 
     return DataLoader(
         dataset,
-        batch_size=num_per_class * task.num_classes,
+        batch_size=num_per_class * num_cl,
         sampler=sampler,
         num_workers=0,    # tăng lên nếu cần tốc độ
         pin_memory=True,

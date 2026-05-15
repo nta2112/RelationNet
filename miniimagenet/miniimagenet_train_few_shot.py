@@ -61,6 +61,14 @@ parser.add_argument("--seed", type=int, default=None,
                     help="Random seed for reproducibility")
 parser.add_argument("--batch_size", type=int, default=1,
                     help="Number of episodes per update (default: 1)")
+# ── Open-World options ──────────────────────────────────────────────────────
+parser.add_argument("--open_world", action="store_true", default=False,
+                    help="Enable Open-World training scenario")
+parser.add_argument("--unseen",     type=int, default=5,
+                    help="Number of unknown classes per episode")
+parser.add_argument("--unseen_batch", type=int, default=None,
+                    help="Number of samples per unknown class (defaults to batch_num_per_class)")
+
 args = parser.parse_args()
 
 # Hyper Parameters
@@ -69,6 +77,19 @@ RELATION_DIM         = args.relation_dim
 CLASS_NUM            = args.class_num
 SAMPLE_NUM_PER_CLASS = args.sample_num_per_class
 BATCH_NUM_PER_CLASS  = args.batch_num_per_class
+OPEN_WORLD           = args.open_world
+UNSEEN_CLASS_NUM     = args.unseen
+UNSEEN_BATCH_NUM     = args.unseen_batch if args.unseen_batch is not None else BATCH_NUM_PER_CLASS
+
+# Thêm tùy chỉnh cho val/test
+parser.add_argument("--val_unseen", type=int, default=None,
+                    help="Number of unseen classes during validation (default: same as --unseen)")
+parser.add_argument("--test_unseen", type=int, default=None,
+                    help="Number of unseen classes during final test (default: same as --unseen)")
+
+args_parsed = parser.parse_known_args()[0] # Dùng parse_known_args để tránh lỗi nếu parse 2 lần
+VAL_UNSEEN_CLASS_NUM  = args_parsed.val_unseen if args_parsed.val_unseen is not None else UNSEEN_CLASS_NUM
+TEST_UNSEEN_CLASS_NUM = args_parsed.test_unseen if args_parsed.test_unseen is not None else UNSEEN_CLASS_NUM
 EPISODE              = args.episode
 TEST_EPISODE         = args.test_episode
 LEARNING_RATE        = args.learning_rate
@@ -95,6 +116,31 @@ def mean_confidence_interval(data, confidence=0.95):
     m, se = np.mean(a), scipy.stats.sem(a)
     h  = se * sp.stats.t._ppf((1 + confidence) / 2., n - 1)
     return m, h
+
+
+def calculate_auroc(scores, labels):
+    """
+    scores: list of max similarity scores.
+    labels: list of binary labels (1 for Known, 0 for Unknown).
+    """
+    scores = np.array(scores)
+    labels = np.array(labels)
+    
+    if len(np.unique(labels)) < 2:
+        return 0.5  # Không đủ dữ liệu để tính AUROC
+    
+    # Sắp xếp giảm dần theo score
+    idx = np.argsort(scores)[::-1]
+    scores = scores[idx]
+    labels = labels[idx]
+    
+    tps = np.cumsum(labels)
+    fps = np.cumsum(1 - labels)
+    
+    tpr = tps / (tps[-1] + 1e-8)
+    fpr = fps / (fps[-1] + 1e-8)
+    
+    return np.trapz(tpr, fpr)
 
 
 class CNNEncoder(nn.Module):
@@ -219,7 +265,7 @@ def main():
     log_path = os.path.join(LOG_DIR,
                             f"miniimagenet_{SAMPLE_NUM_PER_CLASS}shot_{CLASS_NUM}way_train_log.csv")
     log_file = open(log_path, "w")
-    log_file.write("episode,loss,train_accuracy,test_accuracy,h\n")
+    log_file.write("episode,loss,train_accuracy,test_accuracy,h,auroc\n")
     print(f"[INFO] Models will be saved to : {MODEL_DIR}")
     print(f"[INFO] Logs  will be saved to  : {LOG_DIR}")
 
@@ -250,7 +296,11 @@ def main():
         metatrain_folders, metatest_folders = tg.mini_imagenet_folders()
 
     _use_image_list = (TRAIN_JSON is not None)
-    TaskClass = tg.MiniImagenetTaskFromImageList if _use_image_list else tg.MiniImagenetTask
+    if OPEN_WORLD:
+        TaskClass = tg.OpenWorldMiniImagenetTaskFromImageList if _use_image_list else tg.OpenWorldMiniImagenetTask
+        print(f"[INFO] Chế độ OPEN-WORLD: {CLASS_NUM} known, {UNSEEN_CLASS_NUM} unseen")
+    else:
+        TaskClass = tg.MiniImagenetTaskFromImageList if _use_image_list else tg.MiniImagenetTask
 
     # ── Step 2: init neural networks ────────────────────────────────────
     print("init neural networks")
@@ -305,8 +355,14 @@ def main():
 
     for episode in range(EPISODE):
 
-        task = TaskClass(
-            metatrain_folders, CLASS_NUM, SAMPLE_NUM_PER_CLASS, BATCH_NUM_PER_CLASS)
+        if OPEN_WORLD:
+            task = TaskClass(
+                metatrain_folders, CLASS_NUM, UNSEEN_CLASS_NUM, 
+                SAMPLE_NUM_PER_CLASS, BATCH_NUM_PER_CLASS, UNSEEN_BATCH_NUM)
+        else:
+            task = TaskClass(
+                metatrain_folders, CLASS_NUM, SAMPLE_NUM_PER_CLASS, BATCH_NUM_PER_CLASS)
+
         sample_dataloader = tg.get_mini_imagenet_data_loader(
             task, num_per_class=SAMPLE_NUM_PER_CLASS, split="train", shuffle=False,
             image_size=IMAGE_SIZE)
@@ -325,8 +381,11 @@ def main():
         sample_features = torch.sum(sample_features, 1).squeeze(1)
         batch_features  = feature_encoder(batches.to(device))
 
+        # query_num có thể khác do có thêm unseen classes
+        query_num = batch_labels.shape[0]
+
         sample_features_ext = sample_features.unsqueeze(0).repeat(
-            BATCH_NUM_PER_CLASS * CLASS_NUM, 1, 1, 1, 1)
+            query_num, 1, 1, 1, 1)
         batch_features_ext  = batch_features.unsqueeze(0).repeat(
             CLASS_NUM, 1, 1, 1, 1)
         batch_features_ext  = torch.transpose(batch_features_ext, 0, 1)
@@ -336,9 +395,11 @@ def main():
             -1, C * 2, fH, fW)
         relations = relation_network(relation_pairs).view(-1, CLASS_NUM)
 
-        one_hot_labels = torch.zeros(
-            BATCH_NUM_PER_CLASS * CLASS_NUM, CLASS_NUM
-        ).scatter_(1, batch_labels.view(-1, 1), 1).to(device)
+        # Tạo one-hot labels. Chú ý: nhãn -1 (unseen) sẽ thành vector toàn 0.
+        one_hot_labels = torch.zeros(query_num, CLASS_NUM).to(device)
+        for i, label in enumerate(batch_labels):
+            if label != -1:
+                one_hot_labels[i, label] = 1.0
 
         loss = mse(relations, one_hot_labels)
         
@@ -348,9 +409,14 @@ def main():
 
         # ── Calculate Training Accuracy ──────────────────────────────────
         _, predict_labels = torch.max(relations, 1)
-        rewards = [1 if predict_labels[j].cpu() == batch_labels[j] else 0 
-                   for j in range(BATCH_NUM_PER_CLASS * CLASS_NUM)]
-        train_acc = np.sum(rewards) / (BATCH_NUM_PER_CLASS * CLASS_NUM)
+        
+        # Chỉ tính accuracy trên các mẫu "Known"
+        known_mask = (batch_labels != -1)
+        if known_mask.any():
+            rewards = (predict_labels[known_mask].cpu() == batch_labels[known_mask]).sum().item()
+            train_acc = rewards / known_mask.sum().item()
+        else:
+            train_acc = 0.0
         running_train_acc += train_acc
 
         # Update weights if we've accumulated enough episodes
@@ -374,6 +440,7 @@ def main():
         if (episode + 1) % TEST_INTERVAL == 0:
             print("Testing...")
             accuracies = []
+            aurocs     = []
             feature_encoder.eval()
             relation_network.eval()
             with torch.no_grad():
@@ -381,8 +448,15 @@ def main():
                     total_rewards = 0
                     counter = 0
                     VAL_QUERY_NUM = 15
-                    task = TaskClass(
-                        metaval_folders, CLASS_NUM, SAMPLE_NUM_PER_CLASS, VAL_QUERY_NUM)
+                    
+                    if OPEN_WORLD:
+                        task = TaskClass(
+                            metaval_folders, CLASS_NUM, VAL_UNSEEN_CLASS_NUM,
+                            SAMPLE_NUM_PER_CLASS, VAL_QUERY_NUM, VAL_QUERY_NUM)
+                    else:
+                        task = TaskClass(
+                            metaval_folders, CLASS_NUM, SAMPLE_NUM_PER_CLASS, VAL_QUERY_NUM)
+
                     sample_dataloader = tg.get_mini_imagenet_data_loader(
                         task, num_per_class=SAMPLE_NUM_PER_CLASS, split="train", shuffle=False,
                         image_size=IMAGE_SIZE)
@@ -391,6 +465,11 @@ def main():
                         image_size=IMAGE_SIZE)
 
                     sample_images, _ = next(iter(sample_dataloader))
+                    
+                    # Để tính AUROC
+                    all_max_scores = []
+                    all_binary_labels = []
+
                     for test_images, test_labels in test_dataloader:
                         batch_size = test_labels.shape[0]
                         sample_features = feature_encoder(sample_images.to(device))
@@ -411,23 +490,37 @@ def main():
                             -1, C * 2, fH, fW)
                         relations = relation_network(relation_pairs).view(-1, CLASS_NUM)
 
-                        _, predict_labels = torch.max(relations, 1)
-                        rewards = [
-                            1 if predict_labels[j].cpu() == test_labels[j] else 0
-                            for j in range(batch_size)
-                        ]
-                        total_rewards += np.sum(rewards)
-                        counter += batch_size
+                        max_scores, predict_labels = torch.max(relations, 1)
+                        
+                        if OPEN_WORLD:
+                            all_max_scores.extend(max_scores.cpu().numpy())
+                            all_binary_labels.extend([1 if l != -1 else 0 for l in test_labels])
 
-                    accuracies.append(total_rewards / float(counter))
+                        # Chỉ tính accuracy trên known
+                        known_mask = (test_labels != -1)
+                        if known_mask.any():
+                            rewards = (predict_labels[known_mask].cpu() == test_labels[known_mask]).sum().item()
+                            total_rewards += rewards
+                            counter += known_mask.sum().item()
+
+                    if counter > 0:
+                        accuracies.append(total_rewards / float(counter))
+                    
+                    if OPEN_WORLD and len(all_binary_labels) > 0:
+                        aurocs.append(calculate_auroc(all_max_scores, all_binary_labels))
 
             feature_encoder.train()
             relation_network.train()
 
             test_accuracy, h = mean_confidence_interval(accuracies)
-            print(f"test accuracy: {test_accuracy:.4f}  h: {h:.4f}")
+            avg_auroc = np.mean(aurocs) if len(aurocs) > 0 else 0.0
+            
+            if OPEN_WORLD:
+                print(f"test accuracy: {test_accuracy:.4f}  h: {h:.4f}  AUROC: {avg_auroc:.4f}")
+            else:
+                print(f"test accuracy: {test_accuracy:.4f}  h: {h:.4f}")
 
-            log_file.write(f"{episode+1},{loss.item():.6f},{avg_train_acc:.4f},{test_accuracy:.4f},{h:.4f}\n")
+            log_file.write(f"{episode+1},{loss.item():.6f},{avg_train_acc:.4f},{test_accuracy:.4f},{h:.4f},{avg_auroc:.4f}\n")
             log_file.flush()
 
             if test_accuracy > last_accuracy:
@@ -450,55 +543,86 @@ def main():
         if os.path.exists(net_ckpt):
             relation_network.load_state_dict(torch.load(net_ckpt, map_location=device))
             
-        accuracies = []
-        feature_encoder.eval()
-        relation_network.eval()
-        
-        # Research standard: 600 episodes for final testing
-        NUM_FINAL_TEST = 600
-        with torch.no_grad():
-            for i in range(NUM_FINAL_TEST):
-                total_rewards = 0
-                counter = 0
-                task = TaskClass(metatest_folders, CLASS_NUM, SAMPLE_NUM_PER_CLASS, 15)
-                sample_dataloader = tg.get_mini_imagenet_data_loader(
-                    task, num_per_class=SAMPLE_NUM_PER_CLASS, split="train", shuffle=False,
-                    image_size=IMAGE_SIZE)
-                test_dataloader   = tg.get_mini_imagenet_data_loader(
-                    task, num_per_class=15, split="test", shuffle=False,
-                    image_size=IMAGE_SIZE)
-
-                sample_images, _ = next(iter(sample_dataloader))
-                for test_images, test_labels in test_dataloader:
-                    batch_size = test_labels.shape[0]
-                    sample_features = feature_encoder(sample_images.to(device))
-                    test_features   = feature_encoder(test_images.to(device))
-                    _, C, fH, fW    = sample_features.shape
-
-                    sample_features_ext = sample_features.view(CLASS_NUM, SAMPLE_NUM_PER_CLASS, C, fH, fW)
-                    sample_features_ext = torch.sum(sample_features_ext, 1).squeeze(1)
-                    sample_features_ext = sample_features_ext.unsqueeze(0).repeat(batch_size, 1, 1, 1, 1)
+            accuracies = []
+            aurocs     = []
+            feature_encoder.eval()
+            relation_network.eval()
+            
+            # Research standard: 600 episodes for final testing
+            NUM_FINAL_TEST = 600
+            with torch.no_grad():
+                for i in range(NUM_FINAL_TEST):
+                    total_rewards = 0
+                    counter = 0
+                    FINAL_QUERY_NUM = 15
                     
-                    test_features_ext = test_features.unsqueeze(0).repeat(CLASS_NUM, 1, 1, 1, 1)
-                    test_features_ext = torch.transpose(test_features_ext, 0, 1)
+                    if OPEN_WORLD:
+                        task = TaskClass(
+                            metatest_folders, CLASS_NUM, TEST_UNSEEN_CLASS_NUM,
+                            SAMPLE_NUM_PER_CLASS, FINAL_QUERY_NUM, FINAL_QUERY_NUM)
+                    else:
+                        task = TaskClass(metatest_folders, CLASS_NUM, SAMPLE_NUM_PER_CLASS, FINAL_QUERY_NUM)
 
-                    relation_pairs = torch.cat((sample_features_ext, test_features_ext), 2).view(-1, C * 2, fH, fW)
-                    relations = relation_network(relation_pairs).view(-1, CLASS_NUM)
+                    sample_dataloader = tg.get_mini_imagenet_data_loader(
+                        task, num_per_class=SAMPLE_NUM_PER_CLASS, split="train", shuffle=False,
+                        image_size=IMAGE_SIZE)
+                    test_dataloader   = tg.get_mini_imagenet_data_loader(
+                        task, num_per_class=FINAL_QUERY_NUM, split="test", shuffle=False,
+                        image_size=IMAGE_SIZE)
 
-                    _, predict_labels = torch.max(relations, 1)
-                    rewards = [1 if predict_labels[j].cpu() == test_labels[j] else 0 for j in range(batch_size)]
-                    total_rewards += np.sum(rewards)
-                    counter += batch_size
+                    sample_images, _ = next(iter(sample_dataloader))
+                    
+                    all_max_scores = []
+                    all_binary_labels = []
 
-                accuracies.append(total_rewards / float(counter))
-                if (i + 1) % 100 == 0:
-                    print(f"Test Episode [{i+1}/{NUM_FINAL_TEST}] Running Accuracy: {np.mean(accuracies):.4f}")
+                    for test_images, test_labels in test_dataloader:
+                        batch_size = test_labels.shape[0]
+                        sample_features = feature_encoder(sample_images.to(device))
+                        test_features   = feature_encoder(test_images.to(device))
+                        _, C, fH, fW    = sample_features.shape
 
-        test_accuracy, h = mean_confidence_interval(accuracies)
-        print("\n" + "="*30)
-        print(f"FINAL TEST RESULT ({CLASS_NUM}way {SAMPLE_NUM_PER_CLASS}shot)")
-        print(f"Accuracy: {test_accuracy:.4f} +/- {h:.4f}")
-        print("="*30)
+                        sample_features_ext = sample_features.view(CLASS_NUM, SAMPLE_NUM_PER_CLASS, C, fH, fW)
+                        sample_features_ext = torch.sum(sample_features_ext, 1).squeeze(1)
+                        sample_features_ext = sample_features_ext.unsqueeze(0).repeat(batch_size, 1, 1, 1, 1)
+                        
+                        test_features_ext = test_features.unsqueeze(0).repeat(CLASS_NUM, 1, 1, 1, 1)
+                        test_features_ext = torch.transpose(test_features_ext, 0, 1)
+
+                        relation_pairs = torch.cat((sample_features_ext, test_features_ext), 2).view(-1, C * 2, fH, fW)
+                        relations = relation_network(relation_pairs).view(-1, CLASS_NUM)
+
+                        max_scores, predict_labels = torch.max(relations, 1)
+                        
+                        if OPEN_WORLD:
+                            all_max_scores.extend(max_scores.cpu().numpy())
+                            all_binary_labels.extend([1 if l != -1 else 0 for l in test_labels])
+
+                        # Accuracy on knowns
+                        known_mask = (test_labels != -1)
+                        if known_mask.any():
+                            rewards = (predict_labels[known_mask].cpu() == test_labels[known_mask]).sum().item()
+                            total_rewards += rewards
+                            counter += known_mask.sum().item()
+
+                    if counter > 0:
+                        accuracies.append(total_rewards / float(counter))
+                    if OPEN_WORLD and len(all_binary_labels) > 0:
+                        aurocs.append(calculate_auroc(all_max_scores, all_binary_labels))
+
+                    if (i + 1) % 100 == 0:
+                        msg = f"Test Episode [{i+1}/{NUM_FINAL_TEST}] Running Accuracy: {np.mean(accuracies):.4f}"
+                        if OPEN_WORLD:
+                            msg += f" AUROC: {np.mean(aurocs):.4f}"
+                        print(msg)
+
+            test_accuracy, h = mean_confidence_interval(accuracies)
+            avg_test_auroc = np.mean(aurocs) if len(aurocs) > 0 else 0.0
+            print("\n" + "="*30)
+            print(f"FINAL TEST RESULT ({CLASS_NUM}way {SAMPLE_NUM_PER_CLASS}shot)")
+            print(f"Accuracy: {test_accuracy:.4f} +/- {h:.4f}")
+            if OPEN_WORLD:
+                print(f"AUROC:    {avg_test_auroc:.4f}")
+            print("="*30)
 
     print("Training and Testing complete.")
 
