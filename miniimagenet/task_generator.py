@@ -241,6 +241,7 @@ class OpenWorldMiniImagenetTask(object):
             # Chỉ in cảnh báo một lần (hoặc bỏ qua nếu muốn chạy im lặng)
             # print(f"[WARNING] Không đủ class cho Unseen. Giảm từ {num_unknown_classes} xuống {new_unknown}")
             num_unknown_classes = new_unknown
+            self.num_unknown_classes = new_unknown
 
         all_chosen = random.sample(self.character_folders, num_classes + num_unknown_classes)
         known_folders = all_chosen[:num_classes]
@@ -309,6 +310,7 @@ class OpenWorldMiniImagenetTaskFromImageList(object):
             if num_classes > total_available:
                 raise ValueError(f"Số class Known yêu cầu ({num_classes}) lớn hơn tổng số class có sẵn ({total_available})")
             num_unknown_classes = new_unknown
+            self.num_unknown_classes = new_unknown
 
         all_chosen = random.sample(all_keys, num_classes + num_unknown_classes)
         known_classes = all_chosen[:num_classes]
