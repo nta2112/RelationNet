@@ -68,6 +68,10 @@ parser.add_argument("--unseen",     type=int, default=5,
                     help="Number of unknown classes per episode")
 parser.add_argument("--unseen_batch", type=int, default=None,
                     help="Number of samples per unknown class (defaults to batch_num_per_class)")
+parser.add_argument("--val_unseen", type=int, default=None,
+                    help="Number of unseen classes during validation (default: same as --unseen)")
+parser.add_argument("--test_unseen", type=int, default=None,
+                    help="Number of unseen classes during final test (default: same as --unseen)")
 
 args = parser.parse_args()
 
@@ -81,15 +85,8 @@ OPEN_WORLD           = args.open_world
 UNSEEN_CLASS_NUM     = args.unseen
 UNSEEN_BATCH_NUM     = args.unseen_batch if args.unseen_batch is not None else BATCH_NUM_PER_CLASS
 
-# Thêm tùy chỉnh cho val/test
-parser.add_argument("--val_unseen", type=int, default=None,
-                    help="Number of unseen classes during validation (default: same as --unseen)")
-parser.add_argument("--test_unseen", type=int, default=None,
-                    help="Number of unseen classes during final test (default: same as --unseen)")
-
-args_parsed = parser.parse_known_args()[0] # Dùng parse_known_args để tránh lỗi nếu parse 2 lần
-VAL_UNSEEN_CLASS_NUM  = args_parsed.val_unseen if args_parsed.val_unseen is not None else UNSEEN_CLASS_NUM
-TEST_UNSEEN_CLASS_NUM = args_parsed.test_unseen if args_parsed.test_unseen is not None else UNSEEN_CLASS_NUM
+VAL_UNSEEN_CLASS_NUM  = args.val_unseen if args.val_unseen is not None else UNSEEN_CLASS_NUM
+TEST_UNSEEN_CLASS_NUM = args.test_unseen if args.test_unseen is not None else UNSEEN_CLASS_NUM
 EPISODE              = args.episode
 TEST_EPISODE         = args.test_episode
 LEARNING_RATE        = args.learning_rate
