@@ -158,9 +158,18 @@ class MiniImagenetTask(object):
             imgs = [os.path.join(c, x) for x in os.listdir(c)
                     if x.lower().endswith(('.jpg', '.jpeg', '.png', '.bmp'))]
             random.shuffle(imgs)
-            samples[c] = imgs
-            self.train_roots += samples[c][:train_num]
-            self.test_roots  += samples[c][train_num:train_num + test_num]
+            
+            # Đảm bảo lấy đủ số lượng bằng cách lặp lại nếu cần
+            if len(imgs) >= (train_num + test_num):
+                c_train = imgs[:train_num]
+                c_test  = imgs[train_num:train_num + test_num]
+            else:
+                # Tập dữ liệu quá nhỏ, lấy lặp lại ngẫu nhiên
+                c_train = [random.choice(imgs) for _ in range(train_num)]
+                c_test  = [random.choice(imgs) for _ in range(test_num)]
+
+            self.train_roots += c_train
+            self.test_roots  += c_test
 
         self.train_labels = [labels[self._get_class(x)] for x in self.train_roots]
         self.test_labels  = [labels[self._get_class(x)] for x in self.test_roots]
@@ -195,8 +204,16 @@ class MiniImagenetTaskFromImageList(object):
         for cls in chosen_classes:
             imgs = list(class_to_images[cls])
             random.shuffle(imgs)
-            self.train_roots  += imgs[:train_num]
-            self.test_roots   += imgs[train_num:train_num + test_num]
+            
+            if len(imgs) >= (train_num + test_num):
+                c_train = imgs[:train_num]
+                c_test  = imgs[train_num:train_num + test_num]
+            else:
+                c_train = [random.choice(imgs) for _ in range(train_num)]
+                c_test  = [random.choice(imgs) for _ in range(test_num)]
+
+            self.train_roots  += c_train
+            self.test_roots   += c_test
             self.train_labels += [labels[cls]] * train_num
             self.test_labels  += [labels[cls]] * test_num
 
@@ -241,8 +258,16 @@ class OpenWorldMiniImagenetTask(object):
             imgs = [os.path.join(c, x) for x in os.listdir(c)
                     if x.lower().endswith(('.jpg', '.jpeg', '.png', '.bmp'))]
             random.shuffle(imgs)
-            self.train_roots += imgs[:train_num]
-            self.test_roots  += imgs[train_num:train_num + test_num]
+            
+            if len(imgs) >= (train_num + test_num):
+                c_train = imgs[:train_num]
+                c_test  = imgs[train_num:train_num + test_num]
+            else:
+                c_train = [random.choice(imgs) for _ in range(train_num)]
+                c_test  = [random.choice(imgs) for _ in range(test_num)]
+
+            self.train_roots += c_train
+            self.test_roots  += c_test
             self.train_labels += [labels[c]] * train_num
             self.test_labels  += [labels[c]] * test_num
 
@@ -251,8 +276,14 @@ class OpenWorldMiniImagenetTask(object):
             imgs = [os.path.join(c, x) for x in os.listdir(c)
                     if x.lower().endswith(('.jpg', '.jpeg', '.png', '.bmp'))]
             random.shuffle(imgs)
-            # Gán nhãn -1 cho unknown
-            self.test_roots  += imgs[:unknown_test_num]
+            
+            # Đảm bảo lấy đủ số lượng unseen
+            if len(imgs) >= unknown_test_num:
+                c_unseen = imgs[:unknown_test_num]
+            else:
+                c_unseen = [random.choice(imgs) for _ in range(unknown_test_num)]
+                
+            self.test_roots  += c_unseen
             self.test_labels += [-1] * unknown_test_num
 
     def _get_class(self, sample):
@@ -294,8 +325,16 @@ class OpenWorldMiniImagenetTaskFromImageList(object):
         for cls in known_classes:
             imgs = list(class_to_images[cls])
             random.shuffle(imgs)
-            self.train_roots  += imgs[:train_num]
-            self.test_roots   += imgs[train_num:train_num + test_num]
+            
+            if len(imgs) >= (train_num + test_num):
+                c_train = imgs[:train_num]
+                c_test  = imgs[train_num:train_num + test_num]
+            else:
+                c_train = [random.choice(imgs) for _ in range(train_num)]
+                c_test  = [random.choice(imgs) for _ in range(test_num)]
+
+            self.train_roots  += c_train
+            self.test_roots   += c_test
             self.train_labels += [labels[cls]] * train_num
             self.test_labels  += [labels[cls]] * test_num
 
@@ -303,7 +342,13 @@ class OpenWorldMiniImagenetTaskFromImageList(object):
         for cls in unknown_classes:
             imgs = list(class_to_images[cls])
             random.shuffle(imgs)
-            self.test_roots  += imgs[:unknown_test_num]
+            
+            if len(imgs) >= unknown_test_num:
+                c_unseen = imgs[:unknown_test_num]
+            else:
+                c_unseen = [random.choice(imgs) for _ in range(unknown_test_num)]
+
+            self.test_roots  += c_unseen
             self.test_labels += [-1] * unknown_test_num
 
 
