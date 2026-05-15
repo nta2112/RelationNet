@@ -115,6 +115,39 @@ def mean_confidence_interval(data, confidence=0.95):
     return m, h
 
 
+def calculate_ow_metrics(scores, labels, gammas=None):
+    """
+    Tính Seen Accuracy (S), Unseen Accuracy (U) và Harmonic Mean (HM) 
+    bằng cách quét ngưỡng gamma (giống AGNN/Extension).
+    """
+    if gammas is None:
+        gammas = np.linspace(0.0, 1.0, 101)
+    
+    scores = np.array(scores)
+    labels = np.array(labels) # -1 là unseen, >=0 là known
+    
+    known_mask = (labels != -1)
+    unseen_mask = (labels == -1)
+    
+    if known_mask.sum() == 0 or unseen_mask.sum() == 0:
+        return 0.0, 0.0, 0.0, 0.0
+
+    best_hm, best_s, best_u, best_gamma = 0.0, 0.0, 0.0, 0.0
+    
+    for g in gammas:
+        # S: Tỷ lệ mẫu Known có score > g
+        s = float((scores[known_mask] > g).sum()) / known_mask.sum()
+        # U: Tỷ lệ mẫu Unseen có score <= g (từ chối đúng)
+        u = float((scores[unseen_mask] <= g).sum()) / unseen_mask.sum()
+        
+        hm = (2 * s * u) / (s + u) if (s + u) > 0 else 0.0
+        
+        if hm > best_hm:
+            best_hm, best_s, best_u, best_gamma = hm, s, u, g
+            
+    return best_hm, best_s, best_u, best_gamma
+
+
 def calculate_auroc(scores, labels):
     """
     scores: list of max similarity scores.
@@ -137,7 +170,7 @@ def calculate_auroc(scores, labels):
     tpr = tps / (tps[-1] + 1e-8)
     fpr = fps / (fps[-1] + 1e-8)
     
-    return np.trapz(tpr, fpr)
+    return np.trapezoid(tpr, fpr)
 
 
 class CNNEncoder(nn.Module):
@@ -262,7 +295,7 @@ def main():
     log_path = os.path.join(LOG_DIR,
                             f"miniimagenet_{SAMPLE_NUM_PER_CLASS}shot_{CLASS_NUM}way_train_log.csv")
     log_file = open(log_path, "w")
-    log_file.write("episode,loss,train_accuracy,test_accuracy,h,auroc\n")
+    log_file.write("episode,loss,train_accuracy,test_accuracy,h,auroc,S,U,HM\n")
     print(f"[INFO] Models will be saved to : {MODEL_DIR}")
     print(f"[INFO] Logs  will be saved to  : {LOG_DIR}")
 
@@ -343,6 +376,7 @@ def main():
     # ── Step 3: training loop ────────────────────────────────────────────
     print("Training...")
     last_accuracy = 0.0
+    last_hm = 0.0 # Thêm best HM cho Open World
     accumulation_steps = args.batch_size
     feature_encoder_optim.zero_grad()
     relation_network_optim.zero_grad()
@@ -513,18 +547,33 @@ def main():
             avg_auroc = np.mean(aurocs) if len(aurocs) > 0 else 0.0
             
             if OPEN_WORLD:
-                print(f"test accuracy: {test_accuracy:.4f}  h: {h:.4f}  AUROC: {avg_auroc:.4f}")
+                # Tính toán HM, S, U bằng cách quét ngưỡng trên toàn bộ mẫu thu thập được trong đợt test này
+                # Chuyển đổi labels binary [1, 0] sang [1, -1] để hàm calculate_ow_metrics nhận diện Unseen
+                binary_to_unseen = [1 if l == 1 else -1 for l in all_binary_labels]
+                val_hm, val_s, val_u, val_gamma = calculate_ow_metrics(all_max_scores, binary_to_unseen)
+                
+                print(f"test accuracy: {test_accuracy:.4f}  HM: {val_hm:.4f} S: {val_s:.4f} U: {val_u:.4f} AUROC: {avg_auroc:.4f}")
+                
+                # Trong Open World, dùng HM làm tiêu chí lưu model tốt nhất (giống AGNN)
+                if val_hm > last_hm:
+                    torch.save(feature_encoder.state_dict(),  enc_ckpt)
+                    torch.save(relation_network.state_dict(), net_ckpt)
+                    print(f"save networks for episode: {episode+1} (Best HM: {val_hm:.4f})")
+                    last_hm = val_hm
+                    last_accuracy = test_accuracy # đồng bộ
             else:
                 print(f"test accuracy: {test_accuracy:.4f}  h: {h:.4f}")
+                if test_accuracy > last_accuracy:
+                    torch.save(feature_encoder.state_dict(),  enc_ckpt)
+                    torch.save(relation_network.state_dict(), net_ckpt)
+                    print(f"save networks for episode: {episode+1} (Best Acc: {test_accuracy:.4f})")
+                    last_accuracy = test_accuracy
 
-            log_file.write(f"{episode+1},{loss.item():.6f},{avg_train_acc:.4f},{test_accuracy:.4f},{h:.4f},{avg_auroc:.4f}\n")
+            if OPEN_WORLD:
+                log_file.write(f"{episode+1},{loss.item():.6f},{avg_train_acc:.4f},{test_accuracy:.4f},{h:.4f},{avg_auroc:.4f},{val_s:.4f},{val_u:.4f},{val_hm:.4f}\n")
+            else:
+                log_file.write(f"{episode+1},{loss.item():.6f},{avg_train_acc:.4f},{test_accuracy:.4f},{h:.4f},{avg_auroc:.4f},0.0,0.0,0.0\n")
             log_file.flush()
-
-            if test_accuracy > last_accuracy:
-                torch.save(feature_encoder.state_dict(),  enc_ckpt)
-                torch.save(relation_network.state_dict(), net_ckpt)
-                print(f"save networks for episode: {episode}")
-                last_accuracy = test_accuracy
 
     log_file.close()
     
@@ -612,14 +661,24 @@ def main():
                             msg += f" AUROC: {np.mean(aurocs):.4f}"
                         print(msg)
 
-            test_accuracy, h = mean_confidence_interval(accuracies)
+            final_accuracy, final_h = mean_confidence_interval(accuracies)
             avg_test_auroc = np.mean(aurocs) if len(aurocs) > 0 else 0.0
-            print("\n" + "="*30)
+            
+            print("\n" + "="*50)
             print(f"FINAL TEST RESULT ({CLASS_NUM}way {SAMPLE_NUM_PER_CLASS}shot)")
-            print(f"Accuracy: {test_accuracy:.4f} +/- {h:.4f}")
-            if OPEN_WORLD:
-                print(f"AUROC:    {avg_test_auroc:.4f}")
-            print("="*30)
+            print(f"Accuracy: {final_accuracy*100:.2f}% +/- {final_h*100:.2f}%")
+            
+            if OPEN_WORLD and len(all_max_scores) > 0:
+                # Chuyển đổi binary [1, 0] sang [1, -1] cho hàm calculate_ow_metrics
+                # Tuy nhiên ở vòng lặp Final Evaluation, ta có all_raw_labels rồi.
+                # Nếu chưa có all_raw_labels gom toàn bộ, ta dùng binary labels cũng được.
+                final_hm, final_s, final_u, final_gamma = calculate_ow_metrics(all_max_scores, [1 if l == 1 else -1 for l in all_binary_labels])
+                print(f"Seen Acc (S):  {final_s*100:.2f}%")
+                print(f"Unseen Acc (U): {final_u*100:.2f}%")
+                print(f"HM:             {final_hm*100:.2f}%")
+                print(f"Optimal Gamma:  {final_gamma:.3f}")
+                print(f"AUROC:          {avg_test_auroc:.4f}")
+            print("="*50 + "\n")
 
     print("Training and Testing complete.")
 
